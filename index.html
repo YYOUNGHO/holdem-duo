@@ -725,7 +725,13 @@ function doFinal() {
 function doRematch() { if (S.phase !== 'gameover') return false; S.v0 = Date.now(); startGame(); }
 function route(kind, payload) {
   if (role === 'host' || role === 'solo') {
-    if (kind === 'act') return hostCommit(() => (S.phase === 'hand' && S.toAct === 0 ? act(payload.type, payload.to) : false));
+    if (kind === 'act') return hostCommit(() => {
+      if (!(S.phase === 'hand' && S.toAct === 0)) return false;
+      const faced = legal().owe > 0;
+      const ok = act(payload.type, payload.to);
+      if (ok && role === 'solo') noteAction(0, payload.type, faced);
+      return ok;
+    });
     if (kind === 'next') return hostCommit(doNext);
     if (kind === 'final') return hostCommit(doFinal);
     if (kind === 'rematch') return hostCommit(doRematch);
@@ -749,40 +755,120 @@ function startSolo(name, cfg) {
 }
 function resumeSolo() { role = 'solo'; code = null; S = kv.get('hd-solo'); render(); }
 function quitSolo() { clearTimeout(botT); kv.del('hd-solo'); role = null; S = null; render(); }
-/* Monte Carlo equity of the bot's hand against one random hand. Uses only what the bot may know. */
-function botEquity(n) {
-  const me = S.players[1], known = new Set([...me.hole, ...S.board].map(cid));
+const BOT_LEVELS = { easy: '쉬움', normal: '보통', hard: '어려움' };
+function botLevel() { return (S && S.cfg && BOT_LEVELS[S.cfg.botLevel]) ? S.cfg.botLevel : 'normal'; }
+/* Monte Carlo equity of one seat's hand against one random hand. Uses only what that seat may know. */
+function oppStrength(hole, board) {
+  if (!board.length) {
+    const hi = Math.max(hole[0].r, hole[1].r), lo = Math.min(hole[0].r, hole[1].r);
+    let v = (hi + lo - 4) / 24 * 0.6 + (hole[0].r === hole[1].r ? 0.35 : 0) + (hole[0].s === hole[1].s ? 0.06 : 0) + (hi - lo <= 2 ? 0.04 : 0);
+    return Math.max(0.05, Math.min(1, v));
+  }
+  const sc = best(hole.concat(board)).score;
+  if (sc[0] >= 2) return 1;
+  if (sc[0] === 1) return 0.35 + (sc[1] / 14) * 0.55;
+  const flushDraw = 'shdc'.split('').some(su => hole.concat(board).filter(c => c.s === su).length === 4 && hole.some(c => c.s === su));
+  return flushDraw ? 0.55 : 0.1 + Math.max(hole[0].r, hole[1].r) / 14 * 0.15;
+}
+/* Opponent raises this hand narrow its range; an opponent who raises often is read as looser. */
+function rangeTightness(seat) {
+  const oname = S.players[1 - seat].name;
+  const raises = (S.log || []).filter(l => l.h === S.handNo && l.t.startsWith(oname + ' · ') && /벳|레이즈|올인 (?!콜)/.test(l.t)).length;
+  if (!raises) return 0;
+  const st = (S.botStats && S.botStats[1 - seat]) || { acts: 0, aggr: 0 };
+  const agg = (st.aggr + 1) / (st.acts + 4);
+  return Math.min(3, raises) * Math.max(0.25, 1.4 - agg * 2);
+}
+function botEquity(n, seat = 1, tight = 0) {
+  const me = S.players[seat], known = new Set([...me.hole, ...S.board].map(cid));
   const pool = [];
   for (const s of 'shdc') for (let r = 2; r <= 14; r++) { const c = { r, s }; if (!known.has(cid(c))) pool.push(c); }
-  let score = 0;
+  let score = 0, rejects = 0, done = 0;
   for (let t = 0; t < n; t++) {
     for (let i = pool.length - 1; i > pool.length - 8; i--) { const j = Math.floor(Math.random() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
     const draw = pool.slice(pool.length - 7);
     const opp = draw.slice(0, 2), board = S.board.concat(draw.slice(2, 2 + 5 - S.board.length));
+    if (tight > 0 && Math.random() > Math.pow(oppStrength(opp, S.board), tight)) { t--; if (++rejects > n * 30) break; continue; }
     const c = cmp(best(me.hole.concat(board)).score, best(opp.concat(board)).score);
-    score += c > 0 ? 1 : c === 0 ? 0.5 : 0;
+    score += c > 0 ? 1 : c === 0 ? 0.5 : 0; done++;
   }
-  return score / n;
+  return done ? score / done : 0.5;
 }
-function botDecide() {
-  const L = legal(), me = S.players[1], o = S.players[0];
-  const eq = botEquity(S.board.length ? 400 : 250);
+function botCtx(seat) {
+  const L = legal(), me = S.players[seat], o = S.players[1 - seat];
   const potNow = S.pot + me.bet + o.bet;
-  const r = Math.random();
   const sizeTo = frac => {
     const v = S.currentBet + (potNow + L.owe) * frac;
     return Math.max(L.minTo, Math.min(L.maxTo, Math.round(v / S.sb) * S.sb));
   };
+  return { L, me, o, potNow, sizeTo, r: Math.random() };
+}
+/* 쉬움: rough read of its own hand, calls far too often, seldom raises, never bluffs */
+function decideEasy(seat) {
+  const { L, sizeTo, r } = botCtx(seat);
+  const eq = botEquity(60, seat) + (Math.random() - 0.5) * 0.24;
   if (L.owe > 0) {
-    const odds = L.toCall / (potNow + L.toCall);
-    if (L.canRaise && (eq > 0.78 || (eq > 0.66 && r < 0.45))) return { type: 'raise', to: sizeTo(eq > 0.88 && r < 0.3 ? 2 : 0.75) };
-    if (L.canRaise && eq < 0.3 && r < 0.06) return { type: 'raise', to: sizeTo(0.7) };
-    if (eq + 0.04 >= odds || r < 0.08) return { type: 'call' };
+    if (L.canRaise && eq > 0.82 && r < 0.5) return { type: 'raise', to: L.minTo };
+    if (eq > 0.25 || r < 0.35) return { type: 'call' };
     return { type: 'fold' };
   }
-  if (L.canRaise && (eq > 0.62 || (eq > 0.5 && r < 0.3))) return { type: 'raise', to: sizeTo(eq > 0.8 ? 0.8 : 0.55) };
-  if (L.canRaise && eq < 0.35 && r < 0.14) return { type: 'raise', to: sizeTo(0.5) };
+  if (L.canRaise && eq > 0.7 && r < 0.5) return { type: 'raise', to: sizeTo(0.4) };
   return { type: 'check' };
+}
+/* 보통: equity against a random hand compared with pot odds, but a little loose: calls a bit too much,
+   bets small with strong hands and bluffs now and then */
+function decideNormal(seat) {
+  const { L, potNow, sizeTo, r } = botCtx(seat);
+  const eq = botEquity(S.board.length ? 180 : 120, seat) + (Math.random() - 0.5) * 0.1;
+  if (L.owe > 0) {
+    const odds = L.toCall / (potNow + L.toCall);
+    if (L.canRaise && eq > 0.8 && r < 0.6) return { type: 'raise', to: sizeTo(0.6) };
+    if (eq + 0.1 >= odds || r < 0.1) return { type: 'call' };
+    return { type: 'fold' };
+  }
+  if (L.canRaise && eq > 0.66 && r < 0.75) return { type: 'raise', to: sizeTo(0.45) };
+  if (L.canRaise && eq < 0.35 && r < 0.1) return { type: 'raise', to: sizeTo(0.5) };
+  return { type: 'check' };
+}
+/* 어려움: picks the action with the highest expected chips. Equity is computed against the opponent's likely
+   range (narrowed by their bets this hand), and fold odds come from how often this opponent has folded to bets. */
+function decideHard(seat) {
+  const { L, me, o, potNow, sizeTo, r } = botCtx(seat);
+  const tight = rangeTightness(seat);
+  const eq = botEquity(S.board.length ? 400 : 250, seat, tight);
+  const eqC = botEquity(250, seat, tight + 1);
+  const st = (S.botStats && S.botStats[1 - seat]) || {};
+  const fb = ((st.folds || 0) + 1) / ((st.faced || 0) + 3);
+  const foldP = frac => Math.min(0.85, fb * (0.6 + 0.5 * frac));
+  const inPos = seat === S.dealer;
+  const opts = [];
+  if (L.owe > 0) {
+    opts.push({ ev: 0, m: { type: 'fold' } });
+    opts.push({ ev: eq * (potNow + L.toCall) - L.toCall, m: { type: 'call' } });
+  } else {
+    opts.push({ ev: eq * potNow * (inPos ? 1 : 0.92), m: { type: 'check' } });
+  }
+  if (L.canRaise) {
+    for (const f of L.owe > 0 ? [0.75, 1.1] : [0.35, 0.6, 0.9]) {
+      const to = sizeTo(f), add = to - me.bet, oppCall = Math.min(to - o.bet, o.stack);
+      const fp = o.allIn ? 0 : foldP(f);
+      opts.push({ ev: fp * potNow + (1 - fp) * (eqC * (potNow + add + oppCall) - add), m: { type: 'raise', to } });
+    }
+  }
+  opts.sort((a, b) => b.ev - a.ev);
+  let pick = opts[0].m;
+  if (pick.type === 'raise' && L.owe === 0 && !inPos && S.street > 0 && eq > 0.82 && r < 0.25) pick = { type: 'check' };
+  if (pick.type === 'fold' && L.owe === 0) pick = { type: 'check' };
+  return pick;
+}
+function botDecide(seat = 1, level = botLevel()) {
+  return level === 'easy' ? decideEasy(seat) : level === 'hard' ? decideHard(seat) : decideNormal(seat);
+}
+function noteAction(seat, type, faced) {
+  S.botStats = S.botStats || {};
+  const st = S.botStats[seat] = S.botStats[seat] || { acts: 0, aggr: 0, faced: 0, folds: 0 };
+  st.acts++; if (type === 'raise') st.aggr++;
+  if (faced) { st.faced = (st.faced || 0) + 1; if (type === 'fold') st.folds = (st.folds || 0) + 1; }
 }
 function scheduleBot() {
   clearTimeout(botT);
@@ -986,7 +1072,8 @@ function sheetHTML() {
       <div class="kv"><span>현재 블라인드</span><span class="num">${fmt(b.sb)} / ${fmt(b.bb)}</span></div>
       <div class="kv"><span>다음 블라인드 상승</span><span class="num">${S.cfg.levelEvery ? `${nextIn}핸드 후 · ${fmt(b.sb * 2)}/${fmt(b.bb * 2)}` : '없음'}</span></div>
       <div class="kv"><span>통산 전적</span><span class="num">${esc(names[0])} ${rec[names[0]] || 0} : ${rec[names[1]] || 0} ${esc(names[1])}</span></div>
-      <div class="kv"><span>연결</span><span>${oppOnline() ? '연결됨' : '끊김 · 자동 재연결 중'}</span></div>
+      ${role === 'solo' ? botLevelHTML(botLevel()) : ''}
+      <div class="kv"${role === 'solo' ? ' hidden' : ''}><span>연결</span><span>${oppOnline() ? '연결됨' : '끊김 · 자동 재연결 중'}</span></div>
       ${role === 'solo' ? (ui.confirm === 'end' ? `<div class="row2" style="margin-top:8px"><button class="btn ghost" data-a="confirm-no">취소</button><button class="btn gold" data-a="solo-quit">연습 끝내기</button></div>` : `<button class="btn wide" data-a="confirm" data-v="end" style="margin-top:8px">연습 끝내고 처음 화면으로</button>`) : role !== 'host' ? '<p style="margin:8px 0 0;color:var(--muted);font-size:13px">게임 종료는 방장 폰에서 할 수 있어요.</p>' : ui.confirm === 'end'
         ? `<p style="margin:8px 0 0;color:var(--muted);font-size:13px">두 사람 모두 대기실로 돌아가고, 진행 중인 게임은 전적에 남지 않아요.</p><div class="row2"><button class="btn ghost" data-a="confirm-no">취소</button><button class="btn gold" data-a="end-yes">게임 끝내기</button></div>`
         : `<button class="btn wide" data-a="confirm" data-v="end" style="margin-top:8px">게임 끝내고 대기실로</button>`}
@@ -1009,7 +1096,7 @@ function overHTML() {
 }
 
 function netLabel() {
-  if (role === 'solo') return '연습 모드';
+  if (role === 'solo') return `연습 · ${BOT_LEVELS[botLevel()]}`;
   if (role === 'host') return conn && conn.open ? '● 연결됨' : (net === 'error' ? '서버 재연결 중' : '상대 기다리는 중');
   return net === 'connected' ? '● 연결됨' : '재연결 중';
 }
@@ -1035,6 +1122,10 @@ function settingsHTML(cfg, enabled) {
     <div class="field"><span>시작 블라인드</span>${segHTML('sb', [[5, '5/10'], [10, '10/20'], [25, '25/50'], [50, '50/100']], cfg.sb, enabled)}</div>
     <div class="field"><span>블라인드 두 배로</span>${segHTML('lvl', [[0, '안 올림'], [10, '10핸드마다'], [5, '5핸드마다']], cfg.levelEvery, enabled)}</div>`;
 }
+function botLevelHTML(cur) {
+  return `<div class="field"><span>컴퓨터 난이도 (연습용)</span>${segHTML('bot', Object.entries(BOT_LEVELS), cur || 'normal', true)}
+    <span style="font-size:12px;color:var(--muted);letter-spacing:0">${{ easy: '자기 패를 대충 보고, 웬만하면 따라와요. 블러핑은 안 해요.', normal: '이길 확률을 따지지만 조금 느슨해요. 콜이 약간 많고, 가끔 블러핑해요.', hard: '매 순간 기대값이 가장 큰 수를 계산하고, 내 폴드 습관과 베팅 패턴을 읽어요.' }[cur || 'normal']}</span></div>`;
+}
 function nameField(ph) {
   return `<label class="field"><span>내 이름</span><div class="names" style="grid-template-columns:1fr"><input type="text" id="myName" maxlength="8" placeholder="${ph}" value="${esc(ui.name)}" autocomplete="nickname"></div></label>`;
 }
@@ -1047,6 +1138,7 @@ function homeHTML() {
     ${nameField('나')}
     ${settingsHTML(Object.assign({ stack: 1000, sb: 10, levelEvery: 10 }, kv.get('hd-cfg') || {}), true)}
     <button class="btn primary wide" data-a="create">방 만들기</button>
+    ${botLevelHTML((kv.get('hd-cfg') || {}).botLevel)}
     <button class="btn gold wide" data-a="solo">컴퓨터랑 연습하기</button>
     ${kv.get('hd-solo') ? `<button class="btn ghost wide" data-a="solo-resume">하던 연습 이어서 하기</button>` : ''}
     ${resumable ? `<button class="btn ghost wide" data-a="resume">이전 방 이어서 하기</button>` : ''}
@@ -1153,7 +1245,8 @@ function myAct(type, to) {
 }
 function readCfgFromForm() {
   const get = n => { const el = document.querySelector(`input[name=${n}]:checked`); return el ? +el.value : null; };
-  return { stack: get('stack') || 1000, sb: get('sb') || 10, levelEvery: get('lvl') ?? 10 };
+  const bot = document.querySelector('input[name=bot]:checked');
+  return { stack: get('stack') || 1000, sb: get('sb') || 10, levelEvery: get('lvl') ?? 10, botLevel: bot ? bot.value : ((kv.get('hd-cfg') || {}).botLevel || 'normal') };
 }
 
 async function copyInvite() {
@@ -1212,6 +1305,11 @@ function onInput(e) {
 function onChange(e) {
   const t = e.target;
   if (t.type !== 'radio') return;
+  if (t.name === 'bot') {
+    if (role === 'solo' && S) hostCommit(() => { if (S.cfg.botLevel === t.value) return false; S.cfg.botLevel = t.value; });
+    else { kv.set('hd-cfg', readCfgFromForm()); render(); }
+    return;
+  }
   const key = { stack: 'stack', sb: 'sb', lvl: 'levelEvery' }[t.name];
   if (!key) return;
   if (role === 'host' && S && S.phase === 'lobby') hostCommit(() => { if (S.cfg[key] === +t.value) return false; S.cfg[key] = +t.value; });
