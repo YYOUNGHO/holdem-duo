@@ -558,7 +558,7 @@ let role = null, code = null, peer = null, conn = null, net = 'idle', netMsg = '
 let busy = false, busyTimer = null, retryT = null, lastSeen = 0, pingT = null;
 const clone = o => JSON.parse(JSON.stringify(o));
 
-function mySeat() { return role === 'host' ? 0 : role === 'guest' ? 1 : -1; }
+function mySeat() { return role === 'host' || role === 'solo' ? 0 : role === 'guest' ? 1 : -1; }
 function newCode() { const a = 'abcdefghjkmnpqrstuvwxyz23456789'; let s = ''; for (let i = 0; i < 6; i++) s += a[rnd(a.length)]; return s; }
 function inviteLink() { return location.origin + location.pathname + '#' + code; }
 function newPeer(id) {
@@ -586,7 +586,10 @@ function resumeHost(c) {
   if (S && S.phase === 'hand') ui.raiseOpen = false;
   hostOpen();
 }
-function saveHost() { kv.set('hd-host-' + code, S); kv.set('hd-last', code); kv.set('hd-cfg', S.cfg); }
+function saveHost() {
+  if (role === 'solo') { kv.set('hd-solo', S); return; }
+  kv.set('hd-host-' + code, S); kv.set('hd-last', code); kv.set('hd-cfg', S.cfg);
+}
 function hostOpen() {
   if (!peerOk()) { net = 'error'; netMsg = '연결 모듈을 불러오지 못했어요. 새로고침해 주세요'; render(); return; }
   net = 'opening'; render();
@@ -721,7 +724,7 @@ function doFinal() {
 }
 function doRematch() { if (S.phase !== 'gameover') return false; S.v0 = Date.now(); startGame(); }
 function route(kind, payload) {
-  if (role === 'host') {
+  if (role === 'host' || role === 'solo') {
     if (kind === 'act') return hostCommit(() => (S.phase === 'hand' && S.toAct === 0 ? act(payload.type, payload.to) : false));
     if (kind === 'next') return hostCommit(doNext);
     if (kind === 'final') return hostCommit(doFinal);
@@ -729,6 +732,66 @@ function route(kind, payload) {
   } else if (role === 'guest') {
     guestSend(Object.assign({ t: kind }, payload || {}));
   }
+}
+
+/* ===================== Practice bot ===================== */
+const BOT_NAME = '컴퓨터';
+let botT = null;
+function startSolo(name, cfg) {
+  role = 'solo'; code = null;
+  S = freshTable();
+  S.cfg = Object.assign(S.cfg, cfg);
+  S.seats = [{ name: (name || '').trim().slice(0, 8) || '나' }, { name: BOT_NAME }];
+  S.solo = true;
+  seen = new Set(); S.v0 = Date.now();
+  startGame();
+  S.v = 1; saveHost(); render();
+}
+function resumeSolo() { role = 'solo'; code = null; S = kv.get('hd-solo'); render(); }
+function quitSolo() { clearTimeout(botT); kv.del('hd-solo'); role = null; S = null; render(); }
+/* Monte Carlo equity of the bot's hand against one random hand. Uses only what the bot may know. */
+function botEquity(n) {
+  const me = S.players[1], known = new Set([...me.hole, ...S.board].map(cid));
+  const pool = [];
+  for (const s of 'shdc') for (let r = 2; r <= 14; r++) { const c = { r, s }; if (!known.has(cid(c))) pool.push(c); }
+  let score = 0;
+  for (let t = 0; t < n; t++) {
+    for (let i = pool.length - 1; i > pool.length - 8; i--) { const j = Math.floor(Math.random() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+    const draw = pool.slice(pool.length - 7);
+    const opp = draw.slice(0, 2), board = S.board.concat(draw.slice(2, 2 + 5 - S.board.length));
+    const c = cmp(best(me.hole.concat(board)).score, best(opp.concat(board)).score);
+    score += c > 0 ? 1 : c === 0 ? 0.5 : 0;
+  }
+  return score / n;
+}
+function botDecide() {
+  const L = legal(), me = S.players[1], o = S.players[0];
+  const eq = botEquity(S.board.length ? 400 : 250);
+  const potNow = S.pot + me.bet + o.bet;
+  const r = Math.random();
+  const sizeTo = frac => {
+    const v = S.currentBet + (potNow + L.owe) * frac;
+    return Math.max(L.minTo, Math.min(L.maxTo, Math.round(v / S.sb) * S.sb));
+  };
+  if (L.owe > 0) {
+    const odds = L.toCall / (potNow + L.toCall);
+    if (L.canRaise && (eq > 0.78 || (eq > 0.66 && r < 0.45))) return { type: 'raise', to: sizeTo(eq > 0.88 && r < 0.3 ? 2 : 0.75) };
+    if (L.canRaise && eq < 0.3 && r < 0.06) return { type: 'raise', to: sizeTo(0.7) };
+    if (eq + 0.04 >= odds || r < 0.08) return { type: 'call' };
+    return { type: 'fold' };
+  }
+  if (L.canRaise && (eq > 0.62 || (eq > 0.5 && r < 0.3))) return { type: 'raise', to: sizeTo(eq > 0.8 ? 0.8 : 0.55) };
+  if (L.canRaise && eq < 0.35 && r < 0.14) return { type: 'raise', to: sizeTo(0.5) };
+  return { type: 'check' };
+}
+function scheduleBot() {
+  clearTimeout(botT);
+  if (role !== 'solo' || !S || S.phase !== 'hand' || S.toAct !== 1) return;
+  botT = setTimeout(() => {
+    if (role !== 'solo' || S.phase !== 'hand' || S.toAct !== 1) return;
+    const m = botDecide();
+    if (!hostCommit(() => act(m.type, m.to))) hostCommit(() => act(legal().owe > 0 ? 'call' : 'check'));
+  }, 800 + Math.random() * 900);
 }
 
 /* ===================== UI ===================== */
@@ -755,7 +818,7 @@ function cardHTML(c, up, cls = '', delay = 0, animKey = '') {
 function animKey() { return `${S.v0 || ''}-${S.handNo}`; }
 function animating() { return S.result && S.result.runoutFrom != null && ui.anim.key === animKey() && ui.anim.shown < 5; }
 function isUp(i) {
-  if (S.result && S.result.type === 'show') return true;
+  if (S.result && (S.result.type === 'show' || role === 'solo')) return true;
   return i === mySeat() && !ui.hidden;
 }
 function hiCls(c) {
@@ -764,7 +827,7 @@ function hiCls(c) {
   const ids = new Set(R.winners.flatMap(w => R.hands[w].ids));
   return ids.has(cid(c)) ? 'hi' : 'dim';
 }
-function oppOnline() { return role === 'guest' ? net === 'connected' : !!(conn && conn.open); }
+function oppOnline() { if (role === 'solo') return true; return role === 'guest' ? net === 'connected' : !!(conn && conn.open); }
 
 function seatHTML(i, pos) {
   const p = S.players[i], up = isUp(i), R = S.result, me = mySeat();
@@ -902,7 +965,7 @@ function sheetHTML() {
     body = `<ol class="ranks">${RANKS.map((x, k) => `<li><span class="n">${k + 1}</span><span class="nm">${x[0]}<small>${x[1]}</small></span><span class="mini">${x[2].split(' ').map(t => cardHTML(parseC(t), true)).join('')}</span></li>`).join('')}</ol>
       <div class="rules"><b>진행</b> · 각자 2장을 받고, 바닥에 깔리는 5장(플랍 3 · 턴 1 · 리버 1)과 합쳐 가장 좋은 5장으로 겨룹니다.<br>
       <b>순서</b> · 프리플랍은 딜러(SB)가 먼저, 플랍부터는 BB가 먼저 액션합니다. 딜러는 핸드마다 바뀝니다.<br>
-      <b>용어</b> · 체크: 넘기기 · 콜: 상대 베팅만큼 맞추기 · 레이즈: 더 올리기 · 폴드: 포기<br>
+      <b>용어</b> · 체크: 안 걸고 넘기기 · 벳: 아무도 안 걸었을 때 처음 걸기 · 콜: 상대가 건 만큼 맞추기 · 레이즈: 상대보다 더 올리기 · 폴드: 포기<br>
       <b>최소 레이즈</b> · 직전 베팅·레이즈 폭 이상만큼 올려야 합니다.</div>`;
   } else if (ui.sheet === 'log') {
     title = '핸드 기록';
@@ -919,7 +982,7 @@ function sheetHTML() {
       <div class="kv"><span>다음 블라인드 상승</span><span class="num">${S.cfg.levelEvery ? `${nextIn}핸드 후 · ${fmt(b.sb * 2)}/${fmt(b.bb * 2)}` : '없음'}</span></div>
       <div class="kv"><span>통산 전적</span><span class="num">${esc(names[0])} ${rec[names[0]] || 0} : ${rec[names[1]] || 0} ${esc(names[1])}</span></div>
       <div class="kv"><span>연결</span><span>${oppOnline() ? '연결됨' : '끊김 · 자동 재연결 중'}</span></div>
-      ${role !== 'host' ? '<p style="margin:8px 0 0;color:var(--muted);font-size:13px">게임 종료는 방장 폰에서 할 수 있어요.</p>' : ui.confirm === 'end'
+      ${role === 'solo' ? (ui.confirm === 'end' ? `<div class="row2" style="margin-top:8px"><button class="btn ghost" data-a="confirm-no">취소</button><button class="btn gold" data-a="solo-quit">연습 끝내기</button></div>` : `<button class="btn wide" data-a="confirm" data-v="end" style="margin-top:8px">연습 끝내고 처음 화면으로</button>`) : role !== 'host' ? '<p style="margin:8px 0 0;color:var(--muted);font-size:13px">게임 종료는 방장 폰에서 할 수 있어요.</p>' : ui.confirm === 'end'
         ? `<p style="margin:8px 0 0;color:var(--muted);font-size:13px">두 사람 모두 대기실로 돌아가고, 진행 중인 게임은 전적에 남지 않아요.</p><div class="row2"><button class="btn ghost" data-a="confirm-no">취소</button><button class="btn gold" data-a="end-yes">게임 끝내기</button></div>`
         : `<button class="btn wide" data-a="confirm" data-v="end" style="margin-top:8px">게임 끝내고 대기실로</button>`}
     </div>`;
@@ -936,11 +999,12 @@ function overHTML() {
     <p>칩 ${fmt(S.players[w].stack)}개를 모두 가져갔어요</p>
     ${recLine(S.players.map(p => p.name))}
     <button class="btn primary wide" data-a="rematch" ${busy ? 'disabled' : ''}>같은 설정으로 한 판 더</button>
-    ${role === 'host' ? '<button class="btn ghost wide" data-a="to-lobby">대기실로 · 설정 바꾸기</button>' : ''}
+    ${role === 'solo' ? '<button class="btn ghost wide" data-a="solo-quit">처음 화면으로</button>' : role === 'host' ? '<button class="btn ghost wide" data-a="to-lobby">대기실로 · 설정 바꾸기</button>' : ''}
   </div></div>`;
 }
 
 function netLabel() {
+  if (role === 'solo') return '연습 모드';
   if (role === 'host') return conn && conn.open ? '● 연결됨' : (net === 'error' ? '서버 재연결 중' : '상대 기다리는 중');
   return net === 'connected' ? '● 연결됨' : '재연결 중';
 }
@@ -974,10 +1038,12 @@ function homeHTML() {
   const last = kv.get('hd-last');
   const resumable = last && kv.get('hd-host-' + last);
   return `<div class="setup">
-    <div class="hero"><div class="fan" aria-hidden="true">${fanHTML()}</div><h1>둘만의 홀덤</h1><p>방을 만들고 초대 링크를 보내면, 상대는 링크만 열어서 바로 들어와요. 가입도 설치도 없어요.</p></div>
+    <div class="hero"><div class="fan" aria-hidden="true">${fanHTML()}</div><h1>둘만의 홀덤</h1><p>방을 만들고 초대 링크를 보내면, 상대는 링크만 열어서 바로 들어와요. 혼자 컴퓨터랑 연습할 수도 있어요.</p></div>
     ${nameField('나')}
     ${settingsHTML(Object.assign({ stack: 1000, sb: 10, levelEvery: 10 }, kv.get('hd-cfg') || {}), true)}
     <button class="btn primary wide" data-a="create">방 만들기</button>
+    <button class="btn gold wide" data-a="solo">컴퓨터랑 연습하기</button>
+    ${kv.get('hd-solo') ? `<button class="btn ghost wide" data-a="solo-resume">하던 연습 이어서 하기</button>` : ''}
     ${resumable ? `<button class="btn ghost wide" data-a="resume">이전 방 이어서 하기</button>` : ''}
     <button class="btn ghost wide" data-a="sheet" data-v="ranks">족보 보기</button>
     ${sheetHTML()}
@@ -1045,6 +1111,7 @@ function render() {
   if (fid) { const el = document.getElementById(fid); if (el) { el.focus(); try { el.setSelectionRange(selPos, selPos); } catch (e) {} } }
   if (ui.raiseOpen) { const c = $('.controls'); if (c && c.scrollIntoView) c.scrollIntoView({ block: 'end', behavior: 'smooth' }); }
   notifyTurn();
+  scheduleBot();
 }
 function syncAnim() {
   if (!S.result || S.result.runoutFrom == null) return;
@@ -1095,6 +1162,9 @@ function onClick(e) {
   if (el.dataset.a === 'close' && e.target.closest('[data-stop]') && !e.target.closest('button')) return;
   const a = el.dataset.a, v = el.dataset.v;
   switch (a) {
+    case 'solo': { const cfg = readCfgFromForm(); kv.set('hd-cfg', cfg); kv.set('hd-myname', (ui.name || '').trim()); startSolo(ui.name, cfg); return; }
+    case 'solo-resume': resumeSolo(); return;
+    case 'solo-quit': ui.sheet = null; ui.confirm = null; quitSolo(); return;
     case 'create': { const cfg = readCfgFromForm(); kv.set('hd-cfg', cfg); createRoom(ui.name); return; }
     case 'resume': resumeHost(kv.get('hd-last')); return;
     case 'join': joinRoom(ui.name); return;
