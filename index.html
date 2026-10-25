@@ -662,6 +662,7 @@ function closeRoom() {
 let myName = kv.get('hd-myname') || '';
 function joinRoom(name) {
   myName = (name || '').trim().slice(0, 8) || '와이프';
+  kv.del('hd-invite');
   kv.set('hd-myname', myName);
   kv.set('hd-joined-' + code, true);
   role = 'guest';
@@ -744,6 +745,7 @@ function route(kind, payload) {
 const BOT_NAME = '컴퓨터';
 let botT = null;
 function startSolo(name, cfg) {
+  if (code) { kv.set('hd-invite', code); history.replaceState(null, '', location.pathname + location.search); }
   role = 'solo'; code = null;
   S = freshTable();
   S.cfg = Object.assign(S.cfg, cfg);
@@ -753,7 +755,9 @@ function startSolo(name, cfg) {
   startGame();
   S.v = 1; saveHost(); render();
 }
-function resumeSolo() { role = 'solo'; code = null; S = kv.get('hd-solo'); render(); }
+function resumeSolo() {
+  if (code) { kv.set('hd-invite', code); history.replaceState(null, '', location.pathname + location.search); }
+  role = 'solo'; code = null; S = kv.get('hd-solo'); render(); }
 function quitSolo() { clearTimeout(botT); kv.del('hd-solo'); role = null; S = null; render(); }
 const BOT_LEVELS = { easy: '쉬움', normal: '보통', hard: '어려움' };
 function botLevel() { return (S && S.cfg && BOT_LEVELS[S.cfg.botLevel]) ? S.cfg.botLevel : 'normal'; }
@@ -1141,6 +1145,7 @@ function homeHTML() {
     ${botLevelHTML((kv.get('hd-cfg') || {}).botLevel)}
     <button class="btn gold wide" data-a="solo">컴퓨터랑 연습하기</button>
     ${kv.get('hd-solo') ? `<button class="btn ghost wide" data-a="solo-resume">하던 연습 이어서 하기</button>` : ''}
+    ${kv.get('hd-invite') ? `<button class="btn primary wide" data-a="back-invite">초대받은 방으로 돌아가기</button>` : ''}
     ${resumable ? `<button class="btn ghost wide" data-a="resume">이전 방 이어서 하기</button>` : ''}
     <button class="btn ghost wide" data-a="sheet" data-v="ranks">족보 보기</button>
     ${sheetHTML()}
@@ -1149,9 +1154,12 @@ function homeHTML() {
 
 function joinHTML() {
   return `<div class="setup">
-    <div class="hero"><div class="fan" aria-hidden="true">${fanHTML()}</div><h1>둘만의 홀덤</h1><p>초대받은 방이에요. 이름을 적고 들어가세요.</p></div>
+    <div class="hero"><div class="fan" aria-hidden="true">${fanHTML()}</div><h1>둘만의 홀덤</h1><p>초대받은 방이에요. 이름을 적고 들어가세요. 상대가 없을 땐 컴퓨터랑 연습할 수도 있어요.</p></div>
     ${nameField('와이프')}
-    <button class="btn primary wide" data-a="join">입장하기</button>
+    <button class="btn primary wide" data-a="join">초대받은 방에 입장하기</button>
+    ${botLevelHTML((kv.get('hd-cfg') || {}).botLevel)}
+    <button class="btn gold wide" data-a="solo">컴퓨터랑 연습하기</button>
+    ${kv.get('hd-solo') ? `<button class="btn ghost wide" data-a="solo-resume">하던 연습 이어서 하기</button>` : ''}
     <button class="btn ghost wide" data-a="sheet" data-v="ranks">족보 먼저 보기</button>
     ${sheetHTML()}
   </div>`;
@@ -1262,6 +1270,7 @@ function onClick(e) {
   switch (a) {
     case 'solo': { const cfg = readCfgFromForm(); kv.set('hd-cfg', cfg); kv.set('hd-myname', (ui.name || '').trim()); startSolo(ui.name, cfg); return; }
     case 'solo-resume': resumeSolo(); return;
+    case 'back-invite': code = kv.get('hd-invite'); history.replaceState(null, '', '#' + code); break;
     case 'solo-quit': ui.sheet = null; ui.confirm = null; quitSolo(); return;
     case 'create': { const cfg = readCfgFromForm(); kv.set('hd-cfg', cfg); createRoom(ui.name); return; }
     case 'resume': resumeHost(kv.get('hd-last')); return;
