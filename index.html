@@ -840,7 +840,12 @@ function seatHTML(i, pos) {
   if (i !== me && !oppOnline()) pill += '<span class="pill fold">연결 끊김</span>';
   let hint = '', hintCls = '';
   if (R && R.type === 'show' && !animating()) { hint = R.hands[i].name; if (R.winners.includes(i)) hintCls = ' win'; }
-  else if (R && R.type === 'fold' && R.winners[0] === i) { hint = `+${fmt(R.net)}`; hintCls = ' win'; }
+  else if (R && R.type === 'fold') {
+    const won = R.winners[0] === i;
+    const nm = up && p.hole[0] ? (S.board.length >= 3 ? handName(best([...p.hole, ...S.board]).score) : holeHint(p.hole)) : '';
+    hint = won ? (nm ? `${nm} · +${fmt(R.net)}` : `+${fmt(R.net)}`) : nm;
+    if (won) hintCls = ' win';
+  }
   else if (up && S.phase === 'hand' && p.hole[0]) hint = S.board.length >= 3 ? handName(best([...p.hole, ...S.board]).score) : holeHint(p.hole);
   const cards = p.hole.map((c, k) => cardHTML(c, up, hiCls(c), k * 90, `h${i}${k}`)).join('');
   const you = i === me ? ' <span class="pos">(나)</span>' : '';
@@ -887,7 +892,7 @@ function controlsHTML() {
     if (R.type === 'fold') {
       const w = R.winners[0];
       title = `${esc(ps[w].name)} 승리`;
-      sub = `${esc(ps[1 - w].name)} 폴드 · 팟 ${fmt(R.amount)}`;
+      sub = `${esc(ps[1 - w].name)} 폴드 · 팟 ${fmt(R.amount)}<br><span style="font-size:12px">폴드하면 패를 비교하지 않고 남은 사람이 팟을 가져가요${role === 'solo' ? '. 카드 위 족보는 폴드한 시점 기준이에요' : ''}</span>`;
     } else if (R.winners.length === 1) {
       const w = R.winners[0];
       title = `${esc(ps[w].name)} 승리`;
