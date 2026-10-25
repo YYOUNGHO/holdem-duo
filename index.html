@@ -71,7 +71,8 @@ button:focus-visible, input:focus-visible + label, input[type=text]:focus-visibl
 .brand { display: flex; flex-direction: column; min-width: 0; }
 .brand b { font-family: var(--f-display); font-size: 18px; letter-spacing: -.01em; }
 .brand span { font-size: 12px; color: var(--muted); }
-.bar nav { display: flex; gap: 6px; }
+.bar nav { display: flex; gap: 6px; flex: none; }
+.chipbtn { white-space: nowrap; }
 .chipbtn {
   border: 1px solid var(--line); background: transparent; border-radius: 999px;
   padding: 6px 12px; font-size: 13px; color: var(--text);
@@ -1073,6 +1074,7 @@ function sheetHTML() {
     const names = S.players.map(p => p.name);
     const rec = S.record || {};
     body = `<div class="menu">
+      <div class="kv" style="align-items:center"><span>효과음</span><button class="chipbtn" data-a="sound" aria-pressed="${sfx.on}" style="display:inline-flex;align-items:center;gap:6px${sfx.on ? ';border-color:var(--brass);color:var(--brass)' : ''}">${SPEAKER(sfx.on)}${sfx.on ? '켜짐' : '꺼짐'}</button></div>
       <div class="kv"><span>현재 블라인드</span><span class="num">${fmt(b.sb)} / ${fmt(b.bb)}</span></div>
       <div class="kv"><span>다음 블라인드 상승</span><span class="num">${S.cfg.levelEvery ? `${nextIn}핸드 후 · ${fmt(b.sb * 2)}/${fmt(b.bb * 2)}` : '없음'}</span></div>
       <div class="kv"><span>통산 전적</span><span class="num">${esc(names[0])} ${rec[names[0]] || 0} : ${rec[names[1]] || 0} ${esc(names[1])}</span></div>
@@ -1203,6 +1205,94 @@ function errorScreenHTML() {
   return `<div class="status"><h2>${esc(netMsg)}</h2><p>방장에게 새 초대 링크를 받아 다시 열어 주세요.</p><button class="btn primary" style="padding:0 20px" data-a="home">처음 화면으로</button></div>`;
 }
 
+/* ===================== Sound (synthesized, no files) ===================== */
+const sfx = { ctx: null, on: kv.get('hd-sound') !== false, last: null };
+function audio() {
+  if (!sfx.on) return null;
+  try {
+    if (!sfx.ctx) { const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return null; sfx.ctx = new AC(); }
+    if (sfx.ctx.state === 'suspended') sfx.ctx.resume();
+    return sfx.ctx;
+  } catch (e) { return null; }
+}
+function noiseBuf(ctx, dur) {
+  const b = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * dur), ctx.sampleRate), d = b.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  return b;
+}
+function clack(ctx, t, vol) {
+  const n = ctx.createBufferSource(); n.buffer = noiseBuf(ctx, 0.05);
+  const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 3200 + Math.random() * 1500; bp.Q.value = 6;
+  const g = ctx.createGain(); g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+  n.connect(bp).connect(g).connect(ctx.destination); n.start(t); n.stop(t + 0.06);
+  const o = ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = 2600 + Math.random() * 1400;
+  const g2 = ctx.createGain(); g2.gain.setValueAtTime(vol * 0.35, t); g2.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+  o.connect(g2).connect(ctx.destination); o.start(t); o.stop(t + 0.08);
+}
+function playChips(count) {
+  const ctx = audio(); if (!ctx) return;
+  const t0 = ctx.currentTime + 0.01;
+  for (let i = 0; i < count; i++) clack(ctx, t0 + i * (0.045 + Math.random() * 0.03), 0.5 - i * 0.03);
+}
+function playKnock() {
+  const ctx = audio(); if (!ctx) return;
+  [0, 0.13].forEach(dt => {
+    const t = ctx.currentTime + 0.01 + dt;
+    const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(180, t); o.frequency.exponentialRampToValueAtTime(90, t + 0.08);
+    const g = ctx.createGain(); g.gain.setValueAtTime(0.6, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+    o.connect(g).connect(ctx.destination); o.start(t); o.stop(t + 0.12);
+  });
+}
+function playSwish(times = 1) {
+  const ctx = audio(); if (!ctx) return;
+  for (let i = 0; i < times; i++) {
+    const t = ctx.currentTime + 0.01 + i * 0.11;
+    const n = ctx.createBufferSource(); n.buffer = noiseBuf(ctx, 0.16);
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.2;
+    bp.frequency.setValueAtTime(2600, t); bp.frequency.exponentialRampToValueAtTime(700, t + 0.14);
+    const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.35, t + 0.02); g.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+    n.connect(bp).connect(g).connect(ctx.destination); n.start(t); n.stop(t + 0.17);
+  }
+}
+function playWin(happy) {
+  const ctx = audio(); if (!ctx) return;
+  const notes = happy ? [784, 988, 1175, 1568] : [523, 659];
+  notes.forEach((f, i) => {
+    const t = ctx.currentTime + 0.02 + i * 0.09;
+    const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = f;
+    const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(happy ? 0.22 : 0.12, t + 0.015); g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+    o.connect(g).connect(ctx.destination); o.start(t); o.stop(t + 0.4);
+  });
+  if (happy) setTimeout(() => playChips(6), 260);
+}
+/* Plays a sound for each log entry that appeared since the last render, so every mode (host, guest, practice) sounds alike. */
+function sfxFromState() {
+  const log = S && S.log;
+  if (!log || !log.length) { sfx.last = null; return; }
+  const sig = l => l.h + '|' + l.t;
+  const lastSig = sig(log[log.length - 1]);
+  if (sfx.last === null) { sfx.last = lastSig; return; }
+  if (sfx.last === lastSig) return;
+  let k = log.length - 1;
+  while (k >= 0 && sig(log[k]) !== sfx.last) k--;
+  const fresh = k >= 0 ? log.slice(k + 1) : log.slice(-1);
+  sfx.last = lastSig;
+  if (!sfx.on) return;
+  const me = S.players && S.players[mySeat()];
+  fresh.slice(-3).forEach((l, i) => setTimeout(() => {
+    const t = l.t;
+    if (l.sep) playSwish(2);
+    else if (/ · 폴드$/.test(t)) playSwish(1);
+    else if (/ · 체크$/.test(t)) playKnock();
+    else if (/ · 올인/.test(t)) playChips(9);
+    else if (/ · (콜|벳|레이즈) /.test(t)) playChips(/레이즈/.test(t) ? 5 : 3);
+    else if (/^(플랍|턴|리버) · /.test(t)) playSwish(t.startsWith('플랍') ? 3 : 1);
+    else if (/획득|팟 나눔/.test(t)) playWin(!!(me && t.startsWith(me.name + ' · ')));
+  }, i * 380));
+}
+const SPEAKER = on => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4z"/>${on ? '<path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/>' : '<path d="m22 9-6 6"/><path d="m16 9 6 6"/>'}</svg>`;
+document.addEventListener('pointerdown', () => { if (sfx.on) audio(); }, { once: true });
+
 function render() {
   const app = $('#app');
   const ae = document.activeElement, fid = ae && ae.id === 'myName' ? ae.id : null;
@@ -1213,6 +1303,7 @@ function render() {
   else if (!S || S.phase === 'lobby') html = lobbyHTML();
   else { syncAnim(); html = gameHTML(); }
   app.innerHTML = html;
+  if (S && S.players) sfxFromState(); else sfx.last = null;
   if (fid) { const el = document.getElementById(fid); if (el) { el.focus(); try { el.setSelectionRange(selPos, selPos); } catch (e) {} } }
   if (ui.raiseOpen) { const c = $('.controls'); if (c && c.scrollIntoView) c.scrollIntoView({ block: 'end', behavior: 'smooth' }); }
   notifyTurn();
@@ -1284,6 +1375,7 @@ function onClick(e) {
     case 'close-room': if (ui.confirm === 'close') { ui.confirm = null; closeRoom(); } else { ui.confirm = 'close'; el.textContent = '한 번 더 누르면 방을 닫아요'; } return;
     case 'home': role = null; code = null; S = null; net = 'idle'; try { peer && peer.destroy(); } catch (x) {} peer = null; history.replaceState(null, '', location.pathname + location.search); break;
     case 'hide': ui.hidden = !ui.hidden; break;
+    case 'sound': sfx.on = !sfx.on; kv.set('hd-sound', sfx.on); if (sfx.on) playChips(3); toast(sfx.on ? '소리를 켰어요' : '소리를 껐어요'); break;
     case 'fold': myAct('fold'); return;
     case 'check': myAct('check'); return;
     case 'call': myAct('call'); return;
